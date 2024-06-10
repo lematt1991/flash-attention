@@ -23,6 +23,7 @@ from torch.utils.cpp_extension import (
     CUDAExtension,
     CUDA_HOME,
 )
+import shutil
 
 
 with open("README.md", "r", encoding="utf-8") as fh:
@@ -281,7 +282,7 @@ class CachedWheelsCommand(_bdist_wheel):
 
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
-            os.rename(wheel_filename, wheel_path)
+            shutil.move(wheel_filename, wheel_path)
         except (urllib.error.HTTPError, urllib.error.URLError):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
