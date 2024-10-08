@@ -5,6 +5,8 @@ import warnings
 import os
 import re
 import ast
+import glob
+import shutil
 from pathlib import Path
 from packaging.version import parse, Version
 import platform
@@ -22,6 +24,8 @@ from torch.utils.cpp_extension import (
     CppExtension,
     CUDAExtension,
     CUDA_HOME,
+    ROCM_HOME,
+    IS_HIP_EXTENSION,
 )
 import shutil
 
@@ -32,6 +36,19 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
+
+BUILD_TARGET = os.environ.get("BUILD_TARGET", "auto")
+
+if BUILD_TARGET == "auto":
+    if IS_HIP_EXTENSION:
+        IS_ROCM = True
+    else:
+        IS_ROCM = False
+else:
+    if BUILD_TARGET == "cuda":
+        IS_ROCM = False
+    elif BUILD_TARGET == "rocm":
+        IS_ROCM = True
 
 PACKAGE_NAME = "flash_attn"
 
@@ -71,6 +88,10 @@ def get_cuda_bare_metal_version(cuda_dir):
     return raw_output, bare_metal_version
 
 
+def get_hip_version():
+    return parse(torch.version.hip.split()[-1].rstrip('-').replace('-', '+'))
+
+
 def check_if_cuda_home_none(global_option: str) -> None:
     if CUDA_HOME is not None:
         return
@@ -83,9 +104,34 @@ def check_if_cuda_home_none(global_option: str) -> None:
     )
 
 
+def check_if_rocm_home_none(global_option: str) -> None:
+    if ROCM_HOME is not None:
+        return
+    # warn instead of error because user could be downloading prebuilt wheels, so hipcc won't be necessary
+    # in that case.
+    warnings.warn(
+        f"{global_option} was requested, but hipcc was not found."
+    )
+
+
 def append_nvcc_threads(nvcc_extra_args):
     nvcc_threads = os.getenv("NVCC_THREADS") or "4"
     return nvcc_extra_args + ["--threads", nvcc_threads]
+
+
+def rename_cpp_to_cu(cpp_files):
+    for entry in cpp_files:
+        shutil.copy(entry, os.path.splitext(entry)[0] + ".cu")
+
+
+def validate_and_update_archs(archs):
+    # List of allowed architectures
+    allowed_archs = ["native", "gfx90a", "gfx940", "gfx941", "gfx942"]
+
+    # Validate if each element in archs is in allowed_archs
+    assert all(
+        arch in allowed_archs for arch in archs
+    ), f"One of GPU archs of {archs} is invalid or not supported by Flash-Attention"
 
 
 cmdclass = {}
@@ -93,9 +139,12 @@ ext_modules = []
 
 # We want this even if SKIP_CUDA_BUILD because when we run python setup.py sdist we want the .hpp
 # files included in the source distribution, in case the user compiles from source.
-subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
+if IS_ROCM:
+    subprocess.run(["git", "submodule", "update", "--init", "csrc/composable_kernel"])
+else:
+    subprocess.run(["git", "submodule", "update", "--init", "csrc/cutlass"])
 
-if not SKIP_CUDA_BUILD:
+if not SKIP_CUDA_BUILD and not IS_ROCM:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
@@ -112,9 +161,9 @@ if not SKIP_CUDA_BUILD:
     cc_flag = []
     if CUDA_HOME is not None:
         _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-        if bare_metal_version < Version("11.6"):
+        if bare_metal_version < Version("11.7"):
             raise RuntimeError(
-                "FlashAttention is only supported on CUDA 11.6 and above.  "
+                "FlashAttention is only supported on CUDA 11.7 and above.  "
                 "Note: make sure nvcc has a supported version by running nvcc -V."
             )
     # cc_flag.append("-gencode")
@@ -148,10 +197,22 @@ if not SKIP_CUDA_BUILD:
                 "csrc/flash_attn/src/flash_fwd_hdim160_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_hdim192_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_hdim192_bf16_sm80.cu",
-                "csrc/flash_attn/src/flash_fwd_hdim224_fp16_sm80.cu",
-                "csrc/flash_attn/src/flash_fwd_hdim224_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_hdim256_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_hdim256_bf16_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim32_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim32_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim64_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim64_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim96_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim96_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim128_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim128_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim160_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim160_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim192_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim192_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim256_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_hdim256_bf16_causal_sm80.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim32_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim32_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim64_fp16_sm80.cu",
@@ -164,10 +225,22 @@ if not SKIP_CUDA_BUILD:
                 "csrc/flash_attn/src/flash_bwd_hdim160_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim192_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim192_bf16_sm80.cu",
-                "csrc/flash_attn/src/flash_bwd_hdim224_fp16_sm80.cu",
-                "csrc/flash_attn/src/flash_bwd_hdim224_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim256_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_bwd_hdim256_bf16_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim32_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim32_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim64_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim64_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim96_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim96_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim128_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim128_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim160_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim160_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim192_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim192_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim256_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_bwd_hdim256_bf16_causal_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim32_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim32_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim64_fp16_sm80.cu",
@@ -180,10 +253,22 @@ if not SKIP_CUDA_BUILD:
                 "csrc/flash_attn/src/flash_fwd_split_hdim160_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim192_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_sm80.cu",
-                "csrc/flash_attn/src/flash_fwd_split_hdim224_fp16_sm80.cu",
-                "csrc/flash_attn/src/flash_fwd_split_hdim224_bf16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_sm80.cu",
                 "csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim32_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim32_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim64_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim64_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim96_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim96_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim128_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim128_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim160_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim160_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim192_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim192_bf16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim256_fp16_causal_sm80.cu",
+                "csrc/flash_attn/src/flash_fwd_split_hdim256_bf16_causal_sm80.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"] + generator_flag,
@@ -204,6 +289,7 @@ if not SKIP_CUDA_BUILD:
                         # "-DFLASHATTENTION_DISABLE_BACKWARD",
                         # "-DFLASHATTENTION_DISABLE_DROPOUT",
                         # "-DFLASHATTENTION_DISABLE_ALIBI",
+                        # "-DFLASHATTENTION_DISABLE_SOFTCAP",
                         # "-DFLASHATTENTION_DISABLE_UNEVEN_K",
                         # "-DFLASHATTENTION_DISABLE_LOCAL",
                     ]
@@ -216,6 +302,109 @@ if not SKIP_CUDA_BUILD:
                 Path(this_dir) / "csrc" / "flash_attn" / "src",
                 Path(this_dir) / "csrc" / "cutlass" / "include",
             ],
+        )
+    )
+elif not SKIP_CUDA_BUILD and IS_ROCM:
+    ck_dir = "csrc/composable_kernel"
+
+    #use codegen get code dispatch
+    if not os.path.exists("./build"):
+        os.makedirs("build")
+
+    os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd --output_dir build --receipt 2")
+    os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd_appendkv --output_dir build --receipt 2")
+    os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd_splitkv --output_dir build --receipt 2")
+    os.system(f"{sys.executable} {ck_dir}/example/ck_tile/01_fmha/generate.py -d bwd --output_dir build --receipt 2")
+
+    print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
+    TORCH_MAJOR = int(torch.__version__.split(".")[0])
+    TORCH_MINOR = int(torch.__version__.split(".")[1])
+
+    # Check, if ATen/CUDAGeneratorImpl.h is found, otherwise use ATen/cuda/CUDAGeneratorImpl.h
+    # See https://github.com/pytorch/pytorch/pull/70650
+    generator_flag = []
+    torch_dir = torch.__path__[0]
+    if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.h")):
+        generator_flag = ["-DOLD_GENERATOR_PATH"]
+
+    check_if_rocm_home_none("flash_attn")
+    archs = os.getenv("GPU_ARCHS", "native").split(";")
+    validate_and_update_archs(archs)
+
+    cc_flag = [f"--offload-arch={arch}" for arch in archs]
+
+    # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
+    # torch._C._GLIBCXX_USE_CXX11_ABI
+    # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
+    if FORCE_CXX11_ABI:
+        torch._C._GLIBCXX_USE_CXX11_ABI = True
+
+    sources = ["csrc/flash_attn_ck/flash_api.cpp",
+               "csrc/flash_attn_ck/flash_common.cpp",
+               "csrc/flash_attn_ck/mha_bwd.cpp",
+               "csrc/flash_attn_ck/mha_fwd_kvcache.cpp",
+               "csrc/flash_attn_ck/mha_fwd.cpp",
+               "csrc/flash_attn_ck/mha_varlen_bwd.cpp",
+               "csrc/flash_attn_ck/mha_varlen_fwd.cpp"] + glob.glob(
+        f"build/fmha_*wd*.cpp"
+    )
+
+    rename_cpp_to_cu(sources)
+
+    renamed_sources = ["csrc/flash_attn_ck/flash_api.cu",
+                       "csrc/flash_attn_ck/flash_common.cu",
+                       "csrc/flash_attn_ck/mha_bwd.cu",
+                       "csrc/flash_attn_ck/mha_fwd_kvcache.cu",
+                       "csrc/flash_attn_ck/mha_fwd.cu",
+                       "csrc/flash_attn_ck/mha_varlen_bwd.cu",
+                       "csrc/flash_attn_ck/mha_varlen_fwd.cu"] + glob.glob(f"build/fmha_*wd*.cu")
+
+    cc_flag += ["-O3","-std=c++17",
+                "-DCK_TILE_FMHA_FWD_FAST_EXP2=1",
+                "-fgpu-flush-denormals-to-zero",
+                "-DCK_ENABLE_BF16",
+                "-DCK_ENABLE_BF8",
+                "-DCK_ENABLE_FP16",
+                "-DCK_ENABLE_FP32",
+                "-DCK_ENABLE_FP64",
+                "-DCK_ENABLE_FP8",
+                "-DCK_ENABLE_INT8",
+                "-DCK_USE_XDL",
+                "-DUSE_PROF_API=1",
+                # "-DFLASHATTENTION_DISABLE_BACKWARD",
+                "-D__HIP_PLATFORM_HCC__=1"]
+
+    cc_flag += [f"-DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT={os.environ.get('CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT', 3)}"]
+
+    # Imitate https://github.com/ROCm/composable_kernel/blob/c8b6b64240e840a7decf76dfaa13c37da5294c4a/CMakeLists.txt#L190-L214
+    hip_version = get_hip_version()
+    if hip_version > Version('5.7.23302'):
+        cc_flag += ["-fno-offload-uniform-block"]
+    if hip_version > Version('6.1.40090'):
+        cc_flag += ["-mllvm", "-enable-post-misched=0"]
+    if hip_version > Version('6.2.41132'):
+        cc_flag += ["-mllvm", "-amdgpu-early-inline-all=true",
+                    "-mllvm", "-amdgpu-function-calls=false"]
+    if hip_version > Version('6.2.41133') and hip_version < Version('6.3.00000'):
+        cc_flag += ["-mllvm", "-amdgpu-coerce-illegal-types=1"]
+
+    extra_compile_args = {
+        "cxx": ["-O3", "-std=c++17"] + generator_flag,
+        "nvcc": cc_flag + generator_flag,
+    }
+
+    include_dirs = [
+        Path(this_dir) / "csrc" / "composable_kernel" / "include",
+        Path(this_dir) / "csrc" / "composable_kernel" / "library" / "include",
+        Path(this_dir) / "csrc" / "composable_kernel" / "example" / "ck_tile" / "01_fmha",
+    ]
+
+    ext_modules.append(
+        CUDAExtension(
+            name="flash_attn_2_cuda",
+            sources=renamed_sources,
+            extra_compile_args=extra_compile_args,
+            include_dirs=include_dirs,
         )
     )
 
@@ -232,25 +421,33 @@ def get_package_version():
 
 
 def get_wheel_url():
-    # Determine the version numbers that will be used to determine the correct wheel
-    # We're using the CUDA version used to build torch, not the one currently installed
-    # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
-    torch_cuda_version = parse(torch.version.cuda)
     torch_version_raw = parse(torch.__version__)
-    # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.2
-    # to save CI time. Minor versions should be compatible.
-    torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.2")
     python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
     platform_name = get_platform()
     flash_version = get_package_version()
-    # cuda_version = f"{cuda_version_raw.major}{cuda_version_raw.minor}"
-    cuda_version = f"{torch_cuda_version.major}{torch_cuda_version.minor}"
     torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
     cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
 
-    # Determine wheel URL based on CUDA version, torch version, python version and OS
-    wheel_filename = f"{PACKAGE_NAME}-{flash_version}+cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
+    if IS_ROCM:
+        torch_hip_version = get_hip_version()
+        hip_version = f"{torch_hip_version.major}{torch_hip_version.minor}"
+        wheel_filename = f"{PACKAGE_NAME}-{flash_version}+rocm{hip_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
+    else:
+        # Determine the version numbers that will be used to determine the correct wheel
+        # We're using the CUDA version used to build torch, not the one currently installed
+        # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
+        torch_cuda_version = parse(torch.version.cuda)
+        # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.3
+        # to save CI time. Minor versions should be compatible.
+        torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.3")
+        # cuda_version = f"{cuda_version_raw.major}{cuda_version_raw.minor}"
+        cuda_version = f"{torch_cuda_version.major}{torch_cuda_version.minor}"
+
+        # Determine wheel URL based on CUDA version, torch version, python version and OS
+        wheel_filename = f"{PACKAGE_NAME}-{flash_version}+cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
+
     wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{flash_version}", wheel_name=wheel_filename)
+
     return wheel_url, wheel_filename
 
 
@@ -325,7 +522,7 @@ setup(
         )
     ),
     author="Tri Dao",
-    author_email="trid@cs.stanford.edu",
+    author_email="tri@tridao.me",
     description="Flash Attention: Fast and Memory-Efficient Exact Attention",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -341,7 +538,7 @@ setup(
     else {
         "bdist_wheel": CachedWheelsCommand,
     },
-    python_requires=">=3.7",
+    python_requires=">=3.8",
     install_requires=[
         "torch",
         "einops",
